@@ -85,7 +85,7 @@ func (s *HTTPSignalingServer) sessionDescriptionHandler() http.HandlerFunc {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, response)
+		fmt.Fprintf(w, "%s", response)
 	}
 }
 
