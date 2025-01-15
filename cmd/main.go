@@ -16,10 +16,11 @@ func main() {
 	receiverAddr := flag.String("receiver", "localhost:8080", "local http server address")
 	senderAddr := flag.String("sender", "localhost:8081", "remote http server address")
 	send := flag.Bool("send", false, "send media track")
+	gcc := flag.Bool("gcc", false, "configure GCC")
 	flag.Parse()
 
 	if *send {
-		if err := sender(*receiverAddr, *senderAddr); err != nil {
+		if err := sender(*receiverAddr, *senderAddr, *gcc); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -29,9 +30,13 @@ func main() {
 	}
 }
 
-func sender(receiverAddr, senderAddr string) error {
+func sender(receiverAddr, senderAddr string, gcc bool) error {
+	options := []pioncc.PeerOption{}
+	if gcc {
+		options = append(options, pioncc.GCCOption())
+	}
 	signalingClient := pioncc.NewHTTPSignalingClient(receiverAddr)
-	sender, err := pioncc.NewPeer(signalingClient)
+	sender, err := pioncc.NewPeer(signalingClient, options...)
 	if err != nil {
 		return err
 	}

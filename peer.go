@@ -1,11 +1,15 @@
 package pioncc
 
 import (
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/cc"
+	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -20,12 +24,27 @@ type Peer struct {
 	interceptorRegistry *interceptor.Registry
 	mediaEngine         *webrtc.MediaEngine
 	config              webrtc.Configuration
+
+	srcPipelinesLock sync.Mutex
+	srcPipelines     []*sourcePipeline
 }
 
-type PeerOption func(*Peer)
+type PeerOption func(*Peer) error
 
 func GCCOption() PeerOption {
-	return func(p *Peer) {
+	return func(p *Peer) error {
+		bwe, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(1_000_000))
+		})
+		if err != nil {
+			return err
+		}
+		bwe.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) {
+			go p.periodicBandwidthUpdate(estimator)
+		})
+		p.interceptorRegistry.Add(bwe)
+		webrtc.ConfigureTWCCHeaderExtensionSender(p.mediaEngine, p.interceptorRegistry)
+		return nil
 	}
 }
 
@@ -46,12 +65,22 @@ func NewPeer(client *HTTPSignalingClient, options ...PeerOption) (*Peer, error) 
 		interceptorRegistry:   &interceptor.Registry{},
 		mediaEngine:           &webrtc.MediaEngine{},
 		config:                config,
+		srcPipelines:          []*sourcePipeline{},
 	}
 	if err := p.mediaEngine.RegisterDefaultCodecs(); err != nil {
 		return nil, err
 	}
+	if err := webrtc.ConfigureRTCPReports(p.interceptorRegistry); err != nil {
+		return nil, err
+	}
+	if err := webrtc.ConfigureTWCCSender(p.mediaEngine, p.interceptorRegistry); err != nil {
+		return nil, err
+	}
+
 	for _, opt := range options {
-		opt(p)
+		if err := opt(p); err != nil {
+			return nil, err
+		}
 	}
 	api := webrtc.NewAPI(
 		webrtc.WithSettingEngine(p.settingEngine),
@@ -77,16 +106,51 @@ func (p *Peer) AddTrack() error {
 	if err != nil {
 		return err
 	}
-	sp, err := newSourcePipeline("vp8", "videotestsrc", vp8Track)
+	sp, err := newSourcePipeline("vp8", "videotestsrc ! video/x-raw,width=1280,height=720", vp8Track)
 	if err != nil {
 		return err
 	}
-	_, err = p.peerConnection.AddTrack(vp8Track)
+
+	p.srcPipelinesLock.Lock()
+	p.srcPipelines = append(p.srcPipelines, sp)
+	p.srcPipelinesLock.Unlock()
+
+	rtpSender, err := p.peerConnection.AddTrack(vp8Track)
 	if err != nil {
 		return err
 	}
-	slog.Info("track added")
+	go readRTCP(rtpSender)
+
 	return sp.play()
+}
+
+// TODO: Exit when peer is done
+func readRTCP(rtpSender *webrtc.RTPSender) {
+	rtcpBuf := make([]byte, 1500)
+	for {
+		if _, _, err := rtpSender.Read(rtcpBuf); err != nil {
+			log.Printf("error while reading RTCP: %v", err)
+		}
+	}
+}
+
+// TODO: Exit when peer is done
+func (p *Peer) periodicBandwidthUpdate(estimator cc.BandwidthEstimator) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		target := estimator.GetTargetBitrate()
+		p.srcPipelinesLock.Lock()
+		if len(p.srcPipelines) == 0 {
+			return
+		}
+		share := float64(target) / float64(len(p.srcPipelines))
+		for _, sp := range p.srcPipelines {
+			sp.setTargetBitrate(int(share))
+			log.Printf("setting target rate for pipeline to %v", share)
+		}
+		p.srcPipelinesLock.Unlock()
+	}
 }
 
 func (p *Peer) Offer() error {
