@@ -34,4 +34,4 @@ require (
 	golang.org/x/sys v0.26.0 // indirect
 )
 
-replace github.com/pion/interceptor v0.1.37 => ../../../pion/interceptor
+replace github.com/pion/interceptor v0.1.37 => github.com/pion/interceptor v0.1.38-0.20250116090917-6343136f56aa
