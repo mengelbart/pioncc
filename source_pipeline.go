@@ -25,7 +25,7 @@ func newSourcePipeline(codec, source string, writer sampleWriter) (*sourcePipeli
 	pipelineStr := "appsink name=appsink"
 	switch codec {
 	case "vp8":
-		pipelineStr = source + " ! vp8enc name=encoder error-resilient=partitions keyframe-max-dist=10 auto-alt-ref=true cpu-used=5 deadline=1 ! " + pipelineStr
+		pipelineStr = source + " ! vp8enc name=encoder ! " + pipelineStr
 	default:
 		return nil, errors.New("unknown codec")
 	}
