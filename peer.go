@@ -102,6 +102,8 @@ func NewPeer(client *HTTPSignalingClient, options ...PeerOption) (*Peer, error) 
 		lossBasedCC: &lossBasedCC{
 			highestAcked: 0,
 			bitrate:      100_000,
+			min:          100_000,
+			max:          5_000_000,
 		},
 	}
 	if err := p.mediaEngine.RegisterDefaultCodecs(); err != nil {

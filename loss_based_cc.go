@@ -9,6 +9,7 @@ import (
 type lossBasedCC struct {
 	highestAcked int64
 	bitrate      int
+	min, max     int
 }
 
 func (l *lossBasedCC) onFeedback(feedback map[uint32]*ccfb.PacketReportList) {
@@ -34,5 +35,6 @@ func (l *lossBasedCC) onFeedback(feedback map[uint32]*ccfb.PacketReportList) {
 	} else if lossRate < 0.02 {
 		l.bitrate = int(float64(l.bitrate) * 1.05)
 	}
+	l.bitrate = max(min(l.bitrate, l.max), l.min)
 	log.Printf("received acks for %v packets, %v arrived, %v lost, (%v %%)", numPackets, arrived, lost, 100*lossRate)
 }
