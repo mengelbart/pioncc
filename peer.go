@@ -29,6 +29,7 @@ type Peer struct {
 	srcPipelinesLock sync.Mutex
 	srcPipelines     []*sourcePipeline
 
+	dre         *deliveryRateEstimator
 	lossBasedCC *lossBasedCC
 }
 
@@ -99,6 +100,9 @@ func NewPeer(client *HTTPSignalingClient, options ...PeerOption) (*Peer, error) 
 		config:                config,
 		srcPipelinesLock:      sync.Mutex{},
 		srcPipelines:          []*sourcePipeline{},
+		dre: &deliveryRateEstimator{
+			history: map[uint32][]ccfb.PacketReport{},
+		},
 		lossBasedCC: &lossBasedCC{
 			highestAcked: 0,
 			bitrate:      100_000,
@@ -142,10 +146,11 @@ func (p *Peer) AddTrack() error {
 	if err != nil {
 		return err
 	}
-	sp, err := newSourcePipeline("vp8", "videotestsrc ! video/x-raw,width=1280,height=720", vp8Track)
+	sp, err := newSourcePipeline("vp8", "videotestsrc", vp8Track)
 	if err != nil {
 		return err
 	}
+	sp.setTargetBitrate(100_000)
 
 	p.srcPipelinesLock.Lock()
 	p.srcPipelines = append(p.srcPipelines, sp)
@@ -173,7 +178,8 @@ func (p *Peer) readRTCP(rtpSender *webrtc.RTPSender) {
 			log.Print("failed to type assert packet report list")
 			continue
 		}
-		p.lossBasedCC.onFeedback(reports)
+		delivered := p.dre.onFeedback(reports)
+		p.lossBasedCC.onFeedback(reports, delivered)
 		p.updateTargetBitrate(p.lossBasedCC.bitrate)
 	}
 }
