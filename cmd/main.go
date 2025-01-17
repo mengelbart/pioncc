@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"log/slog"
@@ -9,21 +10,25 @@ import (
 	"time"
 
 	"github.com/mengelbart/pioncc"
+	"github.com/pion/webrtc/v4"
 	"golang.org/x/sync/errgroup"
 )
 
 func main() {
+	log.SetFlags(log.Lmicroseconds | log.LUTC | log.Ldate)
+
 	receiverAddr := flag.String("receiver", "localhost:8080", "local http server address")
 	senderAddr := flag.String("sender", "localhost:8081", "remote http server address")
 	send := flag.Bool("send", false, "send media track")
 	gcc := flag.Bool("gcc", false, "configure GCC")
 	genericCC := flag.Bool("gencc", false, "configure generic CC")
 	ccfb := flag.Bool("ccfb", false, "configure CCFB")
-	twcc := flag.Bool("twcc", false, "configure TWCC")
+	twcc := flag.Bool("twcc", false, "configure TWCC feedback (receiver) or header extension (sender)")
+	codec := flag.String("codec", "h264", "codec")
 	flag.Parse()
 
 	if *send {
-		if err := sender(*receiverAddr, *senderAddr, *gcc, *genericCC); err != nil {
+		if err := sender(*receiverAddr, *senderAddr, *gcc, *genericCC, *twcc, *codec); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -33,13 +38,16 @@ func main() {
 	}
 }
 
-func sender(receiverAddr, senderAddr string, gcc, genericCC bool) error {
+func sender(receiverAddr, senderAddr string, gcc, genericCC, twcc bool, codec string) error {
 	options := []pioncc.PeerOption{}
 	if gcc {
 		options = append(options, pioncc.GCCOption())
 	}
 	if genericCC {
 		options = append(options, pioncc.GenericCCOption())
+	}
+	if twcc {
+		options = append(options, pioncc.TWCCHdrExt())
 	}
 	signalingClient := pioncc.NewHTTPSignalingClient(receiverAddr)
 	sender, err := pioncc.NewPeer(signalingClient, options...)
@@ -56,7 +64,11 @@ func sender(receiverAddr, senderAddr string, gcc, genericCC bool) error {
 		}
 		return err
 	})
-	if err := sender.AddTrack(); err != nil {
+	mt, err := codecToMimeType(codec)
+	if err != nil {
+		return err
+	}
+	if err := sender.AddTrack(mt); err != nil {
 		return err
 	}
 
@@ -70,6 +82,16 @@ func sender(receiverAddr, senderAddr string, gcc, genericCC bool) error {
 	}
 
 	return g.Wait()
+}
+
+func codecToMimeType(codec string) (string, error) {
+	switch codec {
+	case "vp8":
+		return webrtc.MimeTypeVP8, nil
+	case "h264":
+		return webrtc.MimeTypeH264, nil
+	}
+	return "", errors.New("unknown codec")
 }
 
 func receiver(senderAddr, receiverAddr string, twcc, ccfb bool) error {

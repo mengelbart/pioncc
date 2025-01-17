@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/bwe"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/ccfb"
 	"github.com/pion/interceptor/pkg/gcc"
@@ -29,8 +30,8 @@ type Peer struct {
 	srcPipelinesLock sync.Mutex
 	srcPipelines     []*sourcePipeline
 
-	dre         *deliveryRateEstimator
-	lossBasedCC *lossBasedCC
+	bwe   *bwe.SendSideController
+	pacer *pacer
 }
 
 type PeerOption func(*Peer) error
@@ -72,6 +73,15 @@ func TWCC() PeerOption {
 	}
 }
 
+func TWCCHdrExt() PeerOption {
+	return func(p *Peer) error {
+		if err := webrtc.ConfigureTWCCHeaderExtensionSender(p.mediaEngine, p.interceptorRegistry); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
 func CCFB() PeerOption {
 	return func(p *Peer) error {
 		if err := webrtc.ConfigureCongestionControlFeedback(p.mediaEngine, p.interceptorRegistry); err != nil {
@@ -100,15 +110,8 @@ func NewPeer(client *HTTPSignalingClient, options ...PeerOption) (*Peer, error) 
 		config:                config,
 		srcPipelinesLock:      sync.Mutex{},
 		srcPipelines:          []*sourcePipeline{},
-		dre: &deliveryRateEstimator{
-			history: map[uint32][]ccfb.PacketReport{},
-		},
-		lossBasedCC: &lossBasedCC{
-			highestAcked: 0,
-			bitrate:      100_000,
-			min:          100_000,
-			max:          5_000_000,
-		},
+		bwe:                   bwe.NewSendSideController(800_000, 100_000, 100_000_000),
+		pacer:                 newPacer(),
 	}
 	if err := p.mediaEngine.RegisterDefaultCodecs(); err != nil {
 		return nil, err
@@ -141,33 +144,42 @@ func NewPeer(client *HTTPSignalingClient, options ...PeerOption) (*Peer, error) 
 	return p, nil
 }
 
-func (p *Peer) AddTrack() error {
-	vp8Track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: "video/vp8"}, "video", "pion_video")
+func (p *Peer) AddTrack(mimeType string) error {
+	localStatic, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: mimeType, ClockRate: 90_000}, "video", "pion_video")
+	// localStatic, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: mimeType}, "video", "pion_video")
 	if err != nil {
 		return err
 	}
-	sp, err := newSourcePipeline("vp8", "videotestsrc", vp8Track)
+	track, err := newTrack(localStatic.Codec(), localStatic, p.pacer)
+	// track, err := newTrack(localStatic.Codec(), localStatic, nil)
 	if err != nil {
 		return err
 	}
-	sp.setTargetBitrate(100_000)
+	// sp, err := newSourcePipeline(mimeType, "videotestsrc ", track)
+	// sp, err := newSourcePipeline(mimeType, "filesrc location=/home/mathis/src/github.com/mengelbart/pion-cc-tests/pioncc/input.y4m ! decodebin ", track)
+	sp, err := newSourcePipeline(mimeType, "filesrc location=/media/hdd/testvideos/sintel_4k.mov ! decodebin ", track)
+	// sp, err := newSourcePipeline(mimeType, "videotestsrc ! video/x-raw,width=1280,height=720,stream-format=byte-stream,format=I420 ", track)
+	if err != nil {
+		return err
+	}
+	sp.setTargetBitrate(800_000)
 
 	p.srcPipelinesLock.Lock()
 	p.srcPipelines = append(p.srcPipelines, sp)
 	p.srcPipelinesLock.Unlock()
 
-	rtpSender, err := p.peerConnection.AddTrack(vp8Track)
+	rtpSender, err := p.peerConnection.AddTrack(localStatic)
 	if err != nil {
 		return err
 	}
 	go p.readRTCP(rtpSender)
-
-	return sp.play()
+	return nil
 }
 
 // TODO: Exit when peer is done
 func (p *Peer) readRTCP(rtpSender *webrtc.RTPSender) {
 	rtcpBuf := make([]byte, 1500)
+	lastRate := 0
 	for {
 		_, attr, err := rtpSender.Read(rtcpBuf)
 		if err != nil {
@@ -178,9 +190,12 @@ func (p *Peer) readRTCP(rtpSender *webrtc.RTPSender) {
 			log.Print("failed to type assert packet report list")
 			continue
 		}
-		delivered := p.dre.onFeedback(reports)
-		p.lossBasedCC.onFeedback(reports, delivered)
-		p.updateTargetBitrate(p.lossBasedCC.bitrate)
+
+		target := p.bwe.OnFeedbackReport(reports)
+		if target != lastRate {
+			lastRate = target
+			p.updateTargetBitrate(target)
+		}
 	}
 }
 
@@ -200,10 +215,10 @@ func (p *Peer) updateTargetBitrate(target int) {
 	if len(p.srcPipelines) == 0 {
 		return
 	}
+	p.pacer.setRate(int(1.5 * float64(target)))
 	share := float64(target) / float64(len(p.srcPipelines))
 	for _, sp := range p.srcPipelines {
 		sp.setTargetBitrate(int(share))
-		log.Printf("setting target rate for pipeline to %v", share)
 	}
 }
 
@@ -224,7 +239,7 @@ func (p *Peer) Offer() error {
 }
 
 func (p *Peer) onTrack(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-	codec := strings.Split(track.Codec().RTPCodecCapability.MimeType, "/")[1]
+	codec := strings.Split(track.Codec().MimeType, "/")[1]
 	pipeline, err := newSinkPipeline(codec, "autovideosink", uint8(track.PayloadType()))
 	if err != nil {
 		panic(err)
@@ -262,6 +277,13 @@ func (p *Peer) onICECandidate(c *webrtc.ICECandidate) {
 
 func (p *Peer) onConnectionStateChange(connectionState webrtc.PeerConnectionState) {
 	slog.Info("Connection State has changed", "state", connectionState.String())
+	if connectionState == webrtc.PeerConnectionStateConnected {
+		for _, p := range p.srcPipelines {
+			if err := p.play(); err != nil {
+				slog.Warn("failed to set pipeline to playing", "error", err)
+			}
+		}
+	}
 }
 
 func (p *Peer) HandleSessionDescription(sd webrtc.SessionDescription) (*webrtc.SessionDescription, error) {

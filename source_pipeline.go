@@ -2,10 +2,13 @@ package pioncc
 
 import (
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 
 	"github.com/go-gst/go-gst/gst"
 	"github.com/go-gst/go-gst/gst/app"
+	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
@@ -23,9 +26,12 @@ func newSourcePipeline(codec, source string, writer sampleWriter) (*sourcePipeli
 	gst.Init(nil)
 
 	pipelineStr := "appsink name=appsink"
+	source = source + " ! clocksync "
 	switch codec {
-	case "vp8":
-		pipelineStr = source + " ! vp8enc name=encoder ! " + pipelineStr
+	case webrtc.MimeTypeVP8:
+		pipelineStr = source + " ! vp8enc name=encoder keyframe-max-dist=10 auto-alt-ref=true cpu-used=5 deadline=1 ! " + pipelineStr
+	case webrtc.MimeTypeH264:
+		pipelineStr = source + " ! x264enc name=encoder speed-preset=ultrafast tune=zerolatency key-int-max=200 ! " + pipelineStr
 	default:
 		return nil, errors.New("unknown codec")
 	}
@@ -77,10 +83,27 @@ func newSourcePipeline(codec, source string, writer sampleWriter) (*sourcePipeli
 }
 
 func (p *sourcePipeline) setTargetBitrate(bps int) {
+	var propertyName string
+	var scaledBitrate any
 	switch p.codec {
-	case "vp8":
-		p.encoder.SetProperty("target-bitrate", bps)
+	case strings.ToLower(webrtc.MimeTypeVP8):
+		propertyName = "target-bitrate"
+		scaledBitrate = bps
+	case strings.ToLower(webrtc.MimeTypeH264):
+		propertyName = "bitrate"
+		scaledBitrate = uint(float64(bps) / 1000.0)
+	default:
+		panic(fmt.Sprintf("invalid codec: %v", p.codec))
 	}
+	if err := p.encoder.SetProperty(propertyName, scaledBitrate); err != nil {
+		log.Printf("failed to update bitrate: %v", err)
+		return
+	}
+	// rate, err := p.encoder.GetProperty(propertyName)
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// log.Printf("new bitrate=%v", rate)
 }
 
 func (p *sourcePipeline) play() error {

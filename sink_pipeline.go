@@ -20,7 +20,9 @@ func newSinkPipeline(codec, sink string, pt uint8) (*sinkPipeline, error) {
 	pipelineStr := "appsrc format=time is-live=true do-timestamp=true name=src ! application/x-rtp"
 	switch strings.ToLower(codec) {
 	case "vp8":
-		pipelineStr += fmt.Sprintf(", payload=%d, encoding-name=VP8 ! rtpvp8depay ! vp8dec ! ", pt) + sink
+		pipelineStr += fmt.Sprintf(", payload=%d, encoding-name=VP8 ! rtpjitterbuffer ! rtpvp8depay ! vp8dec ! ", pt) + sink
+	case "h264":
+		pipelineStr += fmt.Sprintf(", payload=%d ! rtpjitterbuffer ! rtph264depay !  decodebin ! ", pt) + sink
 	default:
 		return nil, fmt.Errorf("unknown codec: %v", codec)
 	}
