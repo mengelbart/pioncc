@@ -185,18 +185,45 @@ func (p *Peer) readRTCP(rtpSender *webrtc.RTPSender) {
 		if err != nil {
 			log.Printf("error while reading RTCP: %v", err)
 		}
-		reports, ok := attr.Get(ccfb.CCFBAttributesKey).(map[uint32]*ccfb.PacketReportList)
+		reports, ok := attr.Get(ccfb.CCFBAttributesKey).([]ccfb.Report)
 		if !ok {
 			log.Print("failed to type assert packet report list")
 			continue
 		}
 
-		target := p.bwe.OnFeedbackReport(reports)
+		target := lastRate
+		for _, report := range reports {
+			acks, rtt := readReport(report)
+			p.bwe.OnAcks(report.Arrival, rtt, acks)
+		}
 		if target != lastRate {
 			lastRate = target
 			p.updateTargetBitrate(target)
 		}
 	}
+}
+
+func readReport(report ccfb.Report) ([]bwe.Acknowledgment, time.Duration) {
+	acks := []bwe.Acknowledgment{}
+	latestAcked := bwe.Acknowledgment{}
+	for _, prs := range report.SSRCToPacketReports {
+		for _, pr := range prs {
+			ack := bwe.Acknowledgment{
+				SeqNr:     pr.SeqNr,
+				Size:      pr.Size,
+				Departure: pr.Departure,
+				Arrived:   pr.Arrived,
+				Arrival:   pr.Arrival,
+				ECN:       bwe.ECN(pr.ECN),
+			}
+			if ack.Arrival.After(latestAcked.Arrival) {
+				latestAcked = ack
+			}
+			acks = append(acks, ack)
+		}
+	}
+	rtt := bwe.MeasureRTT(report.Departure, report.Arrival, latestAcked.Departure, latestAcked.Arrival)
+	return acks, rtt
 }
 
 // TODO: Exit when peer is done
